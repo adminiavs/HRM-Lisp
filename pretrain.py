@@ -2,6 +2,7 @@ from typing import Optional, Any, Sequence, List
 from dataclasses import dataclass
 import os
 import math
+import time
 import yaml
 import shutil
 
@@ -288,11 +289,13 @@ def evaluate(config: PretrainConfig, train_state: TrainState, eval_loader: torch
                 carry = train_state.model.initial_carry(batch)  # type: ignore
 
             # Forward
+            _t0 = time.perf_counter()
             while True:
                 carry, _, metrics, preds, all_finish = train_state.model(carry=carry, batch=batch, return_keys=config.eval_save_outputs)
                 
                 if all_finish:
                     break
+            _t1 = time.perf_counter()
 
             for collection in (batch, preds):
                 for k, v in collection.items():
@@ -305,10 +308,24 @@ def evaluate(config: PretrainConfig, train_state: TrainState, eval_loader: torch
             # Aggregate
             set_id = set_ids[set_name]
             
+            # Augment metrics with latency and prediction length for richer evaluation
+            # latency per example in milliseconds (accumulate sum so we can divide by count later)
+            latency_ms_per_example = ((_t1 - _t0) * 1000.0) / max(1, global_batch_size)
+            metrics["inference_latency_ms"] = torch.tensor(latency_ms_per_example, dtype=torch.float32, device="cuda") * metrics["count"].new_tensor(1.0)
+            # predicted token count per sequence (sum across batch; averaged later by count)
+            if "logits" in preds:
+                pred_token_ids = torch.argmax(preds["logits"], dim=-1)
+                pad_id = int(eval_metadata.pad_id)
+                pred_len_sum = (pred_token_ids != pad_id).to(torch.float32).sum()
+                metrics["pred_token_count"] = pred_len_sum
+            else:
+                metrics.setdefault("pred_token_count", torch.tensor(0.0, dtype=torch.float32, device="cuda"))
+
+            # Initialize aggregation tensors on first batch (ensure our added keys are included)
             if metric_values is None:
                 metric_keys = list(sorted(metrics.keys()))  # Sort keys to guarantee all processes use the same order.
-                metric_values = torch.zeros((len(set_ids), len(metrics.values())), dtype=torch.float32, device="cuda")
-                
+                metric_values = torch.zeros((len(set_ids), len(metric_keys)), dtype=torch.float32, device="cuda")
+
             metric_values[set_id] += torch.stack([metrics[k] for k in metric_keys])
             metric_global_batch_size[set_id] += global_batch_size
 

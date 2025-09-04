@@ -148,6 +148,20 @@ OMP_NUM_THREADS=8 torchrun --nproc-per-node 8 evaluate.py checkpoint=<CHECKPOINT
 
 For the Lisp dataset, you can open `lisp_eval.ipynb` to interactively inspect saved outputs.
 
+### Additional Offline Metrics
+
+After running evaluation with `save_outputs` that include `inputs`, `labels`, and `logits`, you can compute richer text-level metrics (token accuracy, normalized Levenshtein similarity, exact match) from saved predictions:
+
+```bash
+python tools/analyze_predictions.py --checkpoint_dir $(dirname <CHECKPOINT_PATH>)
+```
+
+You may also adjust what is saved during evaluation via CLI:
+
+```bash
+torchrun --nproc-per-node 8 evaluate.py checkpoint=<CHECKPOINT_PATH> save_outputs='["inputs","labels","logits"]'
+```
+
 ## Mini Lisp Interpreter (Beginner-friendly)
 
 A small Lisp interpreter is included for learning and experimentation.
