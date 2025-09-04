@@ -63,25 +63,23 @@ wandb login
 
 ## Run Experiments
 
-### Quick Demo: Sudoku Solver 💻🗲
+### Quick Demo: Lisp Simplification 💻
 
-Train a master-level Sudoku AI capable of solving extremely difficult puzzles on a modern laptop GPU. 🧩
+Generate a symbolic expression simplification dataset and train HRM on it.
 
 ```bash
-# Download and build Sudoku dataset
-python dataset/build_sudoku_dataset.py --output-dir data/sudoku-extreme-1k-aug-1000  --subsample-size 1000 --num-aug 1000
+# Build Lisp dataset (defaults to data/lisp-simplification)
+python dataset/build_lisp_dataset.py --output-dir data/lisp-simplification
 
-# Start training (single GPU, smaller batch size)
-OMP_NUM_THREADS=8 python pretrain.py data_path=data/sudoku-extreme-1k-aug-1000 epochs=20000 eval_interval=2000 global_batch_size=384 lr=7e-5 puzzle_emb_lr=7e-5 weight_decay=1.0 puzzle_emb_weight_decay=1.0
+# Start training (single GPU)
+OMP_NUM_THREADS=8 python pretrain.py --config-name cfg_pretrain_lisp
 ```
 
-Runtime: ~10 hours on a RTX 4070 laptop GPU
+Tip: For multi-GPU, use `torchrun --nproc-per-node 8 pretrain.py --config-name cfg_pretrain_lisp`.
 
 ## Trained Checkpoints 🚧
 
  - [ARC-AGI-2](https://huggingface.co/sapientinc/HRM-checkpoint-ARC-2)
- - [Sudoku 9x9 Extreme (1000 examples)](https://huggingface.co/sapientinc/HRM-checkpoint-sudoku-extreme)
- - [Maze 30x30 Hard (1000 examples)](https://huggingface.co/sapientinc/HRM-checkpoint-maze-30x30-hard)
 
 To use the checkpoints, see Evaluation section below.
 
@@ -100,20 +98,16 @@ python dataset/build_arc_dataset.py  # ARC offical + ConceptARC, 960 examples
 # ARC-2
 python dataset/build_arc_dataset.py --dataset-dirs dataset/raw-data/ARC-AGI-2/data --output-dir data/arc-2-aug-1000  # ARC-2 official, 1120 examples
 
-# Sudoku-Extreme
-python dataset/build_sudoku_dataset.py  # Full version
-python dataset/build_sudoku_dataset.py --output-dir data/sudoku-extreme-1k-aug-1000  --subsample-size 1000 --num-aug 1000  # 1000 examples
-
-# Maze
-python dataset/build_maze_dataset.py  # 1000 examples
+# Lisp simplification
+python dataset/build_lisp_dataset.py --output-dir data/lisp-simplification
 ```
 
 ### Dataset Visualization
 
-Explore the puzzles visually:
+Explore the Lisp dataset visually:
 
-* Open `puzzle_visualizer.html` in your browser.
-* Upload the generated dataset folder located in `data/...`.
+* Open `puzzle_visualizer.html` (Lisp Dataset Visualizer) in your browser.
+* Upload the generated dataset folder located in `data/lisp-simplification`.
 
 ## Launch experiments
 
@@ -135,42 +129,26 @@ OMP_NUM_THREADS=8 torchrun --nproc-per-node 8 pretrain.py data_path=data/arc-2-a
 
 *Runtime:* ~24 hours (checkpoint after 8 hours is often sufficient)
 
-Sudoku Extreme (1k):
+Lisp Simplification:
 
 ```bash
-OMP_NUM_THREADS=8 torchrun --nproc-per-node 8 pretrain.py data_path=data/sudoku-extreme-1k-aug-1000 epochs=20000 eval_interval=2000 lr=1e-4 puzzle_emb_lr=1e-4 weight_decay=1.0 puzzle_emb_weight_decay=1.0
+OMP_NUM_THREADS=8 torchrun --nproc-per-node 8 pretrain.py --config-name cfg_pretrain_lisp
 ```
 
-*Runtime:* ~10 minutes
-
-Maze 30x30 Hard (1k):
-
-```bash
-OMP_NUM_THREADS=8 torchrun --nproc-per-node 8 pretrain.py data_path=data/maze-30x30-hard-1k epochs=20000 eval_interval=2000 lr=1e-4 puzzle_emb_lr=1e-4 weight_decay=1.0 puzzle_emb_weight_decay=1.0
-```
-
-*Runtime:* ~1 hour
-
-### Full Sudoku-Hard
-
-```bash
-OMP_NUM_THREADS=8 torchrun --nproc-per-node 8 pretrain.py data_path=data/sudoku-hard-full epochs=100 eval_interval=10 lr_min_ratio=0.1 global_batch_size=2304 lr=3e-4 puzzle_emb_lr=3e-4 weight_decay=0.1 puzzle_emb_weight_decay=0.1 arch.loss.loss_type=softmax_cross_entropy arch.L_cycles=8 arch.halt_max_steps=8 arch.pos_encodings=learned
-```
-
-*Runtime:* ~2 hours
+### Notes
 
 ## Evaluation
 
 Evaluate your trained models:
 
 * Check `eval/exact_accuracy` in W&B.
-* For ARC-AGI, follow these additional steps:
+* To export predictions and metrics from a checkpoint:
 
 ```bash
 OMP_NUM_THREADS=8 torchrun --nproc-per-node 8 evaluate.py checkpoint=<CHECKPOINT_PATH>
 ```
 
-* Then use the provided `arc_eval.ipynb` notebook to finalize and inspect your results.
+For the Lisp dataset, you can open `lisp_eval.ipynb` to interactively inspect saved outputs.
 
 ## Notes
 
