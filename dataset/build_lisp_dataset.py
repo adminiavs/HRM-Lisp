@@ -40,19 +40,36 @@ class BinOp(Expr):
     def __str__(self):
         return f"({self.op} {self.left} {self.right})"
 
-def generate_expr(depth: int) -> Expr:
-    if depth == 0:
+def generate_expr(depth: int, max_depth: int) -> Expr:
+    """Generate a random expression with a bounded maximum depth.
+
+    The leaves are variables or constants. For division, ensure the right operand
+    does not simplify to zero to avoid invalid expressions.
+    """
+    if depth >= max_depth:
         if random.random() < 0.5:
             return Const(random.randint(0, 9))
-        else:
-            return Var(random.choice(['x', 'y', 'z']))
-    else:
-        op = random.choice(['+', '*', '-', '/'])
-        left = generate_expr(depth - 1)
-        right = generate_expr(depth - 1)
-        return BinOp(op, left, right)
+        return Var(random.choice(['x', 'y', 'z']))
+
+    op = random.choice(['+', '*', '-', '/'])
+    left = generate_expr(depth + 1, max_depth)
+    right = generate_expr(depth + 1, max_depth)
+
+    # Prevent division by zero by regenerating the right side if it simplifies to 0
+    if op == '/':
+        while True:
+            simplified_right = simplify(right)
+            if not (isinstance(simplified_right, Const) and simplified_right.val == 0):
+                break
+            right = generate_expr(depth + 1, max_depth)
+
+    return BinOp(op, left, right)
 
 def simplify(expr: Expr) -> Expr:
+    """Recursively simplify an expression using algebraic rules."""
+    if isinstance(expr, Const) or isinstance(expr, Var):
+        return expr
+
     if isinstance(expr, BinOp):
         left = simplify(expr.left)
         right = simplify(expr.right)
@@ -60,25 +77,72 @@ def simplify(expr: Expr) -> Expr:
 
         # Constant folding
         if isinstance(left, Const) and isinstance(right, Const):
-            if op == '+': return Const(left.val + right.val)
-            if op == '*': return Const(left.val * right.val)
-            if op == '-': return Const(left.val - right.val)
-            if op == '/' and right.val != 0: return Const(left.val // right.val)
+            if op == '+':
+                return Const(left.val + right.val)
+            if op == '-':
+                return Const(left.val - right.val)
+            if op == '*':
+                return Const(left.val * right.val)
+            if op == '/':
+                if right.val == 0:
+                    # Keep as-is to indicate undefined; caller may handle separately
+                    return BinOp(op, left, right)
+                # Integer division to stay within integer constants
+                return Const(left.val // right.val)
 
-        # Identity elements
-        if op == '+' and isinstance(left, Const) and left.val == 0: return right
-        if op == '+' and isinstance(right, Const) and right.val == 0: return left
-        if op == '*' and isinstance(left, Const) and left.val == 1: return right
-        if op == '*' and isinstance(right, Const) and right.val == 1: return left
-        if op == '*' and isinstance(left, Const) and left.val == 0: return Const(0)
-        if op == '*' and isinstance(right, Const) and right.val == 0: return Const(0)
-        if op == '-' and isinstance(right, Const) and right.val == 0: return left
+        # Identity and annihilator rules
+        if op == '+':
+            if isinstance(left, Const) and left.val == 0:
+                return right
+            if isinstance(right, Const) and right.val == 0:
+                return left
+
+        if op == '*':
+            if isinstance(left, Const) and left.val == 1:
+                return right
+            if isinstance(right, Const) and right.val == 1:
+                return left
+            if (isinstance(left, Const) and left.val == 0) or (isinstance(right, Const) and right.val == 0):
+                return Const(0)
+
+        # Subtraction rules
+        if op == '-':
+            if isinstance(right, Const) and right.val == 0:
+                return left
+            # x - x -> 0
+            if str(left) == str(right):
+                return Const(0)
+
+        # Division rules
+        if op == '/':
+            # x / 1 -> x
+            if isinstance(right, Const) and right.val == 1:
+                return left
+            # x / x -> 1, but avoid 0/0
+            if str(left) == str(right):
+                if isinstance(left, Const) and left.val == 0:
+                    return BinOp(op, left, right)
+                return Const(1)
 
         return BinOp(op, left, right)
+
     return expr
 
-def to_tokens(expr: Expr) -> List[str]:
-    return str(expr).replace('(', '( ').replace(')', ' )').split()
+
+def expr_to_tokens(expr: Expr) -> List[str]:
+    """Recursively traverse the expression tree and produce prefix tokens."""
+    if isinstance(expr, Const):
+        return [str(expr.val)]
+    if isinstance(expr, Var):
+        return [expr.name]
+    if isinstance(expr, BinOp):
+        return ['(', expr.op] + expr_to_tokens(expr.left) + expr_to_tokens(expr.right) + [')']
+    return []
+
+def pad_and_truncate(tokens: List[str], max_len: int, pad_token: str) -> List[str]:
+    if len(tokens) > max_len:
+        return tokens[:max_len]
+    return tokens + [pad_token] * (max_len - len(tokens))
 
 # --- Dataset Creation ---
 
@@ -94,37 +158,51 @@ def create_lisp_dataset(config: DataProcessConfig):
     np.random.seed(config.seed)
 
     print("Generating Lisp expression dataset...")
-    inputs, labels = [], []
-    for _ in range(config.num_samples):
-        expr = generate_expr(config.max_depth)
+    inputs: List[List[str]] = []
+    labels: List[List[str]] = []
+
+    # Depth variability and duplicate filtering
+    MIN_DEPTH = 2
+    MAX_DEPTH = max(config.max_depth, 3)
+    seen_expressions: set[str] = set()
+
+    while len(inputs) < config.num_samples:
+        current_max_depth = random.randint(MIN_DEPTH, MAX_DEPTH)
+        expr = generate_expr(0, current_max_depth)
         simplified_expr = simplify(expr)
-        inputs.append(to_tokens(expr))
-        labels.append(to_tokens(simplified_expr))
+
+        expr_str = str(expr)
+        if expr_str in seen_expressions:
+            continue
+
+        input_tokens_list = expr_to_tokens(expr)
+        target_tokens_list = expr_to_tokens(simplified_expr)
+
+        inputs.append(input_tokens_list)
+        labels.append(target_tokens_list)
+        seen_expressions.add(expr_str)
 
     # Build vocabulary
-    all_tokens = set()
+    all_tokens: set[str] = set()
     for seq in inputs + labels:
         all_tokens.update(seq)
-    
-    vocab = {tok: i + 1 for i, tok in enumerate(sorted(list(all_tokens)))}
+
+    vocab: Dict[str, int] = {tok: i + 1 for i, tok in enumerate(sorted(list(all_tokens)))}
     vocab['<pad>'] = 0
     
     print(f"Vocabulary size: {len(vocab)}")
     print(f"Vocabulary: {vocab}")
 
-    def tokenize_and_pad(seq_list: List[List[str]]) -> np.ndarray:
-        padded_seqs = []
+    def tokens_to_ids_and_pad(seq_list: List[List[str]]) -> np.ndarray:
+        padded_seqs: List[List[int]] = []
         for seq in seq_list:
-            token_ids = [vocab[tok] for tok in seq]
-            if len(token_ids) > config.seq_len:
-                token_ids = token_ids[:config.seq_len]
-            else:
-                token_ids += [vocab['<pad>']] * (config.seq_len - len(token_ids))
+            padded = pad_and_truncate(seq, config.seq_len, pad_token='<pad>')
+            token_ids = [vocab[tok] for tok in padded]
             padded_seqs.append(token_ids)
         return np.array(padded_seqs, dtype=np.int32)
 
-    inputs_np = tokenize_and_pad(inputs)
-    labels_np = tokenize_and_pad(labels)
+    inputs_np = tokens_to_ids_and_pad(inputs)
+    labels_np = tokens_to_ids_and_pad(labels)
     
     # Create train/test split
     split_idx = int(config.num_samples * 0.9)

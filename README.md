@@ -148,6 +148,53 @@ OMP_NUM_THREADS=8 torchrun --nproc-per-node 8 evaluate.py checkpoint=<CHECKPOINT
 
 For the Lisp dataset, you can open `lisp_eval.ipynb` to interactively inspect saved outputs.
 
+## Mini Lisp Interpreter (Beginner-friendly)
+
+A small Lisp interpreter is included for learning and experimentation.
+
+- **Module**: `utils/mini_lisp.py`
+- **Run REPL**:
+
+```bash
+python utils/mini_lisp.py
+```
+
+- **Run a Lisp file**:
+
+```bash
+python utils/mini_lisp.py path/to/program.lisp
+```
+
+### Language features
+- **Data**: numbers, strings, booleans `#t`/`#f`, symbols, lists
+- **Special forms**: `quote` (and `'`), `if`, `define`, `set!`, `lambda`, `begin`, `and`, `or`
+- **Builtins**: `+ - * / < <= > >= = eq? equal? cons car cdr list length null? list? symbol? number? boolean? pair? not display newline`
+- **Utilities**: `load` to evaluate a file from within the REPL
+
+### Examples
+
+```lisp
+; arithmetic and comparison
+(+ 1 2 3)           ; 6
+(if (> 3 2) 42 0)   ; 42
+
+; lists
+(define xs (list 1 2 3))
+(car xs)            ; 1
+(cdr xs)            ; (2 3)
+
+; functions
+(define (square x) (* x x))
+(square 5)          ; 25
+
+; lambda
+((lambda (a b) (+ a b)) 3 4) ; 7
+
+; booleans and logic
+(and #t (> 3 2))    ; #t
+(or #f 0 "hi")     ; 0 (truthy)
+```
+
 ## Notes
 
  - Small-sample learning typically exhibits accuracy variance of around ±2 points.
