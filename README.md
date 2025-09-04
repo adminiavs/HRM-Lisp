@@ -135,8 +135,6 @@ Lisp Simplification:
 OMP_NUM_THREADS=8 torchrun --nproc-per-node 8 pretrain.py --config-name cfg_pretrain_lisp
 ```
 
-### Notes
-
 ## Evaluation
 
 Evaluate your trained models:
@@ -153,7 +151,7 @@ For the Lisp dataset, you can open `lisp_eval.ipynb` to interactively inspect sa
 ## Notes
 
  - Small-sample learning typically exhibits accuracy variance of around ±2 points.
- - For Sudoku-Extreme (1,000-example dataset), late-stage overfitting may cause numerical instability during training and Q-learning. It is advisable to use early stopping once the training accuracy approaches 100%.
+ 
 
 ## Citation 📜
 
