@@ -69,6 +69,13 @@ class PretrainConfig(pydantic.BaseModel):
     eval_interval: Optional[int] = None
     eval_save_outputs: List[str] = []
 
+    # Early stopping
+    early_stopping_metric: Optional[str] = None
+    early_stopping_mode: str = "max"
+    early_stopping_patience: int = 5
+    early_stopping_min_delta: float = 0.0
+    early_stopping_set: Optional[str] = None
+
 
 @dataclass
 class TrainState:
@@ -419,6 +426,10 @@ def launch(hydra_config: DictConfig):
         wandb.log({"num_params": sum(x.numel() for x in train_state.model.parameters())}, step=0)
         save_code_and_config(config)
 
+    # Early stopping state
+    best_score = -float("inf") if (config.early_stopping_mode.lower() == "max") else float("inf")
+    no_improve_iters = 0
+
     # Training Loop
     for _iter_id in range(total_iters):
         print (f"[Rank {RANK}, World Size {WORLD_SIZE}]: Epoch {_iter_id * train_epochs_per_iter}")
@@ -436,8 +447,54 @@ def launch(hydra_config: DictConfig):
         train_state.model.eval()
         metrics = evaluate(config, train_state, eval_loader, eval_metadata, rank=RANK, world_size=WORLD_SIZE)
 
-        if RANK == 0 and metrics is not None:
-            wandb.log(metrics, step=train_state.step)
+        stop_signal = 0
+        if RANK == 0:
+            if metrics is not None:
+                wandb.log(metrics, step=train_state.step)
+                # Early stopping check (rank 0 computes the decision)
+                if config.early_stopping_metric is not None:
+                    set_key = config.early_stopping_set
+                    if set_key is None or set_key not in metrics:
+                        # Default to the first available set
+                        set_key = next(iter(metrics.keys()))
+
+                    metric_name = config.early_stopping_metric
+                    current_score = metrics.get(set_key, {}).get(metric_name, None)
+
+                    if current_score is not None:
+                        mode = config.early_stopping_mode.lower()
+                        min_delta = float(config.early_stopping_min_delta)
+
+                        improved = False
+                        if mode == "max":
+                            improved = current_score > (best_score + min_delta)
+                        else:
+                            improved = current_score < (best_score - min_delta)
+
+                        if improved:
+                            best_score = float(current_score)
+                            no_improve_iters = 0
+                        else:
+                            no_improve_iters += 1
+
+                        if no_improve_iters >= int(config.early_stopping_patience):
+                            print(f"Early stopping triggered at iter {_iter_id}: {metric_name} did not improve on set '{set_key}' for {config.early_stopping_patience} evals. Best: {best_score}.")
+                            stop_signal = 1
+                    else:
+                        print(f"Warning: Early stopping metric '{metric_name}' not found in metrics for set '{set_key}'. Skipping early stopping check this eval.")
+            # Always broadcast a stop signal to keep ranks in sync
+            if WORLD_SIZE > 1 and dist.is_initialized():
+                stop_tensor = torch.tensor(stop_signal, device="cuda")
+                dist.broadcast(stop_tensor, src=0)
+        else:
+            # Non-zero ranks receive stop signal every eval
+            if WORLD_SIZE > 1 and dist.is_initialized():
+                stop_tensor = torch.tensor(0, device="cuda")
+                dist.broadcast(stop_tensor, src=0)
+                stop_signal = int(stop_tensor.item())
+
+        if stop_signal == 1:
+            break
             
         ############ Checkpointing
         if RANK == 0 and (config.checkpoint_every_eval or (_iter_id == total_iters - 1)):

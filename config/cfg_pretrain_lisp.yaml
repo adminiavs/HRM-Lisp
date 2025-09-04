@@ -12,7 +12,7 @@ data_path: data/lisp-simplification
 
 # Hyperparams - Training
 global_batch_size: 256
-epochs: 20000
+epochs: 15000
 eval_interval: 1000
 checkpoint_every_eval: True
 
@@ -28,6 +28,13 @@ puzzle_emb_weight_decay: 0.1
 
 # Hyperparams - Puzzle embeddings training (not used for Lisp, but kept for compatibility)
 puzzle_emb_lr: 1e-2
+
+# Early stopping
+early_stopping_metric: accuracy
+early_stopping_mode: max
+early_stopping_patience: 5
+early_stopping_min_delta: 0.0
+early_stopping_set: null
 
 # NOTE: Update 'vocab_size' in config/arch/hrm_v1.yaml with the output from
 # the dataset generation script.
