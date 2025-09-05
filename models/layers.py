@@ -7,8 +7,11 @@ import torch.nn.functional as F
 try:
     from flash_attn_interface import flash_attn_func  # type: ignore[import]
 except ImportError:
-    # Fallback to FlashAttention 2
-    from flash_attn import flash_attn_func  # type: ignore[import]
+    try:
+        # Fallback to FlashAttention 2
+        from flash_attn import flash_attn_func  # type: ignore[import]
+    except ImportError:  # pragma: no cover - optional dependency
+        flash_attn_func = None  # type: ignore
 
 from models.common import trunc_normal_init_
 
@@ -96,7 +99,7 @@ class RotaryEmbedding(nn.Module):
 
 
 class Attention(nn.Module):
-    def __init__(self, hidden_size, head_dim, num_heads, num_key_value_heads, causal=False):
+    def __init__(self, hidden_size, head_dim, num_heads, num_key_value_heads, causal=False, use_flash_attn=False):
         super().__init__()
 
         self.hidden_size = hidden_size
@@ -105,6 +108,7 @@ class Attention(nn.Module):
         self.num_heads = num_heads
         self.num_key_value_heads = num_key_value_heads
         self.causal = causal
+        self.use_flash_attn = use_flash_attn
 
         self.qkv_proj = CastedLinear(self.hidden_size, (self.num_heads + 2 * self.num_key_value_heads) * self.head_dim, bias=False)
         self.o_proj = CastedLinear(self.output_size, self.hidden_size, bias=False)
@@ -126,10 +130,19 @@ class Attention(nn.Module):
             cos, sin = cos_sin
             query, key = apply_rotary_pos_emb(query, key, cos, sin)
 
-        # flash attn
-        attn_output = flash_attn_func(q=query, k=key, v=value, causal=self.causal)
-        if isinstance(attn_output, tuple):  # fa2 and fa3 compatibility
-            attn_output = attn_output[0]
+        # flash attention (if available and enabled), else fallback to PyTorch SDPA
+        if self.use_flash_attn and (flash_attn_func is not None):
+            attn_output = flash_attn_func(q=query, k=key, v=value, causal=self.causal)
+            if isinstance(attn_output, tuple):  # fa2 and fa3 compatibility
+                attn_output = attn_output[0]
+        else:
+            # F.scaled_dot_product_attention expects [bs, heads, seq, head_dim]
+            q = query.permute(0, 2, 1, 3)
+            k = key.permute(0, 2, 1, 3)
+            v = value.permute(0, 2, 1, 3)
+            attn_output = F.scaled_dot_product_attention(q, k, v, is_causal=self.causal)  # type: ignore
+            # Return to [bs, seq, heads, head_dim]
+            attn_output = attn_output.permute(0, 2, 1, 3)
 
         # attn_output: [batch_size, num_heads, seq_len, head_dim]
         attn_output = attn_output.view(batch_size, seq_len, self.output_size)  # type: ignore

@@ -58,6 +58,7 @@ class HierarchicalReasoningModel_ACTV1Config(BaseModel):
     use_act_in_eval: bool = True
 
     forward_dtype: str = "bfloat16"
+    use_flash_attn: bool = False
 
 
 class HierarchicalReasoningModel_ACTV1Block(nn.Module):
@@ -69,7 +70,8 @@ class HierarchicalReasoningModel_ACTV1Block(nn.Module):
             head_dim=config.hidden_size // config.num_heads,
             num_heads=config.num_heads,
             num_key_value_heads=config.num_heads,
-            causal=False
+            causal=False,
+            use_flash_attn=config.use_flash_attn
         )
         self.mlp = SwiGLU(
             hidden_size=config.hidden_size,

@@ -7,6 +7,10 @@ defaults:
 hydra:
   output_subdir: null
 
+# Increase reasoning depth for Lisp tasks
+H_cycles: 4
+L_cycles: 4
+
 # Data path for the Lisp dataset
 data_path: data/lisp-simplification
 
