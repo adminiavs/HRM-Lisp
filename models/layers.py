@@ -108,7 +108,7 @@ class Attention(nn.Module):
         self.num_heads = num_heads
         self.num_key_value_heads = num_key_value_heads
         self.causal = causal
-        self.use_flash_attn = False  # Force-disable FlashAttention regardless of configuration
+        self.use_flash_attn = use_flash_attn  # Respect configuration
 
         self.qkv_proj = CastedLinear(self.hidden_size, (self.num_heads + 2 * self.num_key_value_heads) * self.head_dim, bias=False)
         self.o_proj = CastedLinear(self.output_size, self.hidden_size, bias=False)
@@ -145,7 +145,7 @@ class Attention(nn.Module):
             attn_output = attn_output.permute(0, 2, 1, 3)
 
         # attn_output: [batch_size, num_heads, seq_len, head_dim]
-        attn_output = attn_output.view(batch_size, seq_len, self.output_size)  # type: ignore
+        attn_output = attn_output.reshape(batch_size, seq_len, self.output_size)  # type: ignore
         return self.o_proj(attn_output)
 
 

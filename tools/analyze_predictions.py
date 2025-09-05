@@ -194,6 +194,7 @@ def main() -> None:
             print(f"Warning: failed to load {fp}: {e}")
             continue
 
+        # Expect pretrain.py to persist requested tensors like inputs, labels, logits
         inputs = blob.get("inputs")
         labels = blob.get("labels")
         logits = blob.get("logits")

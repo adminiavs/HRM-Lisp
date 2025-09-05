@@ -118,6 +118,7 @@ class HierarchicalReasoningModel_ACTV1_Inner(nn.Module):
         self.lm_head      = CastedLinear(self.config.hidden_size, self.config.vocab_size, bias=False)
         self.q_head       = CastedLinear(self.config.hidden_size, 2, bias=True)
 
+        # ceil div: compute ceil(puzzle_emb_ndim / hidden_size) using floor-division trick
         self.puzzle_emb_len = -(self.config.puzzle_emb_ndim // -self.config.hidden_size)  # ceil div
         if self.config.puzzle_emb_ndim > 0:
             # Zero init puzzle embeddings

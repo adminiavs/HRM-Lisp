@@ -85,7 +85,7 @@ def simplify(expr: Expr) -> Expr:
                 return Const(left.val * right.val)
             if op == '/':
                 if right.val == 0:
-                    # Keep as-is to indicate undefined; caller may handle separately
+                    # Preserve undefined division explicitly for downstream filtering/analysis
                     return BinOp(op, left, right)
                 # Integer division to stay within integer constants
                 return Const(left.val // right.val)

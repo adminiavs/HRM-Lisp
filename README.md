@@ -13,39 +13,29 @@ These results underscore HRM’s potential as a transformative advancement towar
 
 ### Prerequisites ⚙️
 
-Ensure PyTorch and CUDA are installed. The repo needs CUDA extensions to be built. If not present, run the following commands:
+Ensure PyTorch with CUDA is installed following the official selector for your system:
 
 ```bash
-# Install CUDA 12.6
-CUDA_URL=https://developer.download.nvidia.com/compute/cuda/12.6.3/local_installers/cuda_12.6.3_560.35.05_linux.run
+# Visit the official PyTorch install page and choose your env:
+# https://pytorch.org/get-started/locally/
+# Example (CUDA 12.x):
+pip3 install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
 
-wget -q --show-progress --progress=bar:force:noscroll -O cuda_installer.run $CUDA_URL
-sudo sh cuda_installer.run --silent --toolkit --override
-
-export CUDA_HOME=/usr/local/cuda-12.6
-
-# Install PyTorch with CUDA 12.6
-PYTORCH_INDEX_URL=https://download.pytorch.org/whl/cu126
-
-pip3 install torch torchvision torchaudio --index-url $PYTORCH_INDEX_URL
-
-# Additional packages for building extensions
+# Additional build tools
 pip3 install packaging ninja wheel setuptools setuptools-scm
 ```
 
-Then install FlashAttention. For Hopper GPUs, install FlashAttention 3
+FlashAttention is optional. If you install it and enable it in config, the model can use it:
 
 ```bash
-git clone git@github.com:Dao-AILab/flash-attention.git
-cd flash-attention/hopper
-python setup.py install
-```
+# Hopper / FA-3 (see repo for details)
+pip3 install flash-attn --no-build-isolation  # or build from source per docs
 
-For Ampere or earlier GPUs, install FlashAttention 2
-
-```bash
+# Ampere or earlier (FA-2)
 pip3 install flash-attn
 ```
+
+Note: The Attention module respects the `use_flash_attn` flag. If FlashAttention is not installed, it will fall back to PyTorch scaled dot-product attention.
 
 ## Install Python Dependencies 🐍
 
@@ -150,10 +140,12 @@ For the Lisp dataset, you can open `lisp_eval.ipynb` to interactively inspect sa
 
 ### Additional Offline Metrics
 
-After running evaluation with `save_outputs` that include `inputs`, `labels`, and `logits`, you can compute richer text-level metrics (token accuracy, normalized Levenshtein similarity, exact match) from saved predictions:
+After running evaluation with `save_outputs` that include `inputs`, `labels`, and `logits`, compute richer text-level metrics offline from saved predictions:
 
 ```bash
 python tools/analyze_predictions.py --checkpoint_dir $(dirname <CHECKPOINT_PATH>)
+
+The training script's evaluate step computes simple, GPU-friendly aggregates and saves the requested tensors. Advanced metrics are calculated here offline for modularity and clarity.
 ```
 
 You may also adjust what is saved during evaluation via CLI:
