@@ -78,6 +78,11 @@ class ACTLossHead(nn.Module):
                 "steps":          torch.where(valid_metrics, new_carry.steps, 0).sum(),
             }
 
+            # Expose optional per-example tensors for richer evaluation if requested
+            # These will be filtered by return_keys downstream
+            outputs.setdefault("steps", new_carry.steps.clone())
+            outputs.setdefault("seq_is_correct", seq_is_correct.clone())
+
         # Losses
         # FIXME: Assuming the batch is always full
         lm_loss = (self.loss_fn(outputs["logits"], labels, ignore_index=IGNORE_LABEL_ID) / loss_divisor).sum()

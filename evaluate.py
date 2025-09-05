@@ -15,6 +15,13 @@ class EvalConfig(pydantic.BaseModel):
     
     save_outputs: List[str] = ["inputs", "labels", "puzzle_identifiers", "logits", "q_halt_logits", "q_continue_logits"]
 
+    # Optional evaluation behavior overrides
+    eval_pass_k: int | None = None
+    eval_tar_n: int | None = None
+    eval_enable_semantic_equivalence: bool | None = None
+    eval_compute_token_f1: bool | None = None
+    eval_enable_act_analysis: bool | None = None
+
 
 def launch():
     eval_cfg = EvalConfig(**OmegaConf.to_container(OmegaConf.from_cli()))  # type: ignore
@@ -42,6 +49,18 @@ def launch():
     # Allow overriding what to save during eval and ensure we have a valid checkpoint dir
     config.eval_save_outputs = eval_cfg.save_outputs
     config.checkpoint_path = os.path.dirname(eval_cfg.checkpoint)
+
+    # Propagate optional eval overrides if provided
+    if eval_cfg.eval_pass_k is not None:
+        config.eval_pass_k = int(eval_cfg.eval_pass_k)
+    if eval_cfg.eval_tar_n is not None:
+        config.eval_tar_n = int(eval_cfg.eval_tar_n)
+    if eval_cfg.eval_enable_semantic_equivalence is not None:
+        config.eval_enable_semantic_equivalence = bool(eval_cfg.eval_enable_semantic_equivalence)
+    if eval_cfg.eval_compute_token_f1 is not None:
+        config.eval_compute_token_f1 = bool(eval_cfg.eval_compute_token_f1)
+    if eval_cfg.eval_enable_act_analysis is not None:
+        config.eval_enable_act_analysis = bool(eval_cfg.eval_enable_act_analysis)
 
     # Dataloader
     train_loader, train_metadata = create_dataloader(config, "train", test_set_mode=False, epochs_per_iter=1, global_batch_size=config.global_batch_size, rank=RANK, world_size=WORLD_SIZE)

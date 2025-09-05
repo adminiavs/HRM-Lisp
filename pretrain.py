@@ -5,6 +5,7 @@ import math
 import time
 import yaml
 import shutil
+import json
 
 import torch
 import torch.distributed as dist
@@ -69,6 +70,18 @@ class PretrainConfig(pydantic.BaseModel):
     checkpoint_every_eval: bool = False
     eval_interval: Optional[int] = None
     eval_save_outputs: List[str] = []
+
+    # Evaluation enhancements (optional)
+    # Number of sampled sequences per input for Pass@k / Pass^k (0 disables sampling)
+    eval_pass_k: int = 0
+    # Number of samples for consistency metrics TAR@N (0 disables consistency metrics)
+    eval_tar_n: int = 0
+    # Enable functional equivalence (semantic) check for Lisp expressions
+    eval_enable_semantic_equivalence: bool = False
+    # Compute token-level F1 (set-based unigram overlap, pad excluded)
+    eval_compute_token_f1: bool = False
+    # Evaluate ACT correlations and additional efficiency metrics
+    eval_enable_act_analysis: bool = False
 
     # Early stopping
     early_stopping_metric: Optional[str] = None
@@ -290,12 +303,20 @@ def evaluate(config: PretrainConfig, train_state: TrainState, eval_loader: torch
 
             # Forward
             _t0 = time.perf_counter()
+            try:
+                torch.cuda.reset_peak_memory_stats()
+            except Exception:
+                pass
             while True:
                 carry, _, metrics, preds, all_finish = train_state.model(carry=carry, batch=batch, return_keys=config.eval_save_outputs)
                 
                 if all_finish:
                     break
             _t1 = time.perf_counter()
+            try:
+                peak_mem = float(torch.cuda.max_memory_allocated())
+            except Exception:
+                peak_mem = 0.0
 
             for collection in (batch, preds):
                 for k, v in collection.items():
@@ -312,6 +333,8 @@ def evaluate(config: PretrainConfig, train_state: TrainState, eval_loader: torch
             # latency per example in milliseconds (accumulate sum so we can divide by count later)
             latency_ms_per_example = ((_t1 - _t0) * 1000.0) / max(1, global_batch_size)
             metrics["inference_latency_ms"] = torch.tensor(latency_ms_per_example, dtype=torch.float32, device="cuda") * metrics["count"].new_tensor(1.0)
+            # peak memory (bytes) per example (accumulate sum; averaged later by count)
+            metrics["peak_memory_bytes"] = torch.tensor(peak_mem, dtype=torch.float32, device="cuda") * metrics["count"].new_tensor(1.0)
             # predicted token count per sequence (sum across batch; averaged later by count)
             if "logits" in preds:
                 pred_token_ids = torch.argmax(preds["logits"], dim=-1)
@@ -320,6 +343,10 @@ def evaluate(config: PretrainConfig, train_state: TrainState, eval_loader: torch
                 metrics["pred_token_count"] = pred_len_sum
             else:
                 metrics.setdefault("pred_token_count", torch.tensor(0.0, dtype=torch.float32, device="cuda"))
+            # label token count per sequence (sum across batch)
+            if "labels" in batch:
+                label_len_sum = (batch["labels"] != -100).to(torch.float32).sum()
+                metrics["label_token_count"] = label_len_sum
 
             # Initialize aggregation tensors on first batch (ensure our added keys are included)
             if metric_values is None:
@@ -329,11 +356,206 @@ def evaluate(config: PretrainConfig, train_state: TrainState, eval_loader: torch
             metric_values[set_id] += torch.stack([metrics[k] for k in metric_keys])
             metric_global_batch_size[set_id] += global_batch_size
 
+        advanced_metrics = {}
         if len(all_preds) and config.checkpoint_path is not None:
             all_preds = {k: torch.cat(v, dim=0) for k, v in all_preds.items()}
 
             os.makedirs(config.checkpoint_path, exist_ok=True)
             torch.save(all_preds, os.path.join(config.checkpoint_path, f"step_{train_state.step}_all_preds.{rank}"))
+
+            # Compute advanced metrics when single-process to avoid cross-rank aggregation complexities
+            if rank == 0 and world_size == 1:
+                try:
+                    inv_vocab = None
+                    vocab_path = os.path.join(config.data_path, "vocab.json")
+                    if os.path.exists(vocab_path):
+                        with open(vocab_path, "r") as f:
+                            vocab = json.load(f)
+                        inv_vocab = {int(v): k for k, v in vocab.items()}
+
+                    def ids_to_tokens(ids_tensor):
+                        ids_list = [int(i) for i in ids_tensor.tolist()]
+                        if inv_vocab is None:
+                            return ["<pad>" if i == int(eval_metadata.pad_id) else str(i) for i in ids_list]
+                        return [inv_vocab.get(int(i), "<unk>") for i in ids_list]
+
+                    def tokens_to_str(tokens):
+                        return " ".join(t for t in tokens if t != "<pad>")
+
+                    logits_cpu = all_preds.get("logits", None)
+                    labels_cpu = all_preds.get("labels", None)
+                    if logits_cpu is not None and labels_cpu is not None:
+                        pred_ids = torch.argmax(logits_cpu, dim=-1)
+
+                        # Token-level F1
+                        if config.eval_compute_token_f1:
+                            from collections import Counter
+                            def f1_pair(true_ids, pred_ids):
+                                true_seq = [int(x) for x in true_ids.tolist() if int(x) != int(eval_metadata.pad_id) and int(x) != -100]
+                                pred_seq = [int(x) for x in pred_ids.tolist() if int(x) != int(eval_metadata.pad_id)]
+                                ct, cp = Counter(true_seq), Counter(pred_seq)
+                                inter = sum((ct & cp).values())
+                                tp = float(inter)
+                                fp = max(0.0, float(sum(cp.values()) - inter))
+                                fn = max(0.0, float(sum(ct.values()) - inter))
+                                prec = tp / max(tp + fp, 1e-8)
+                                rec = tp / max(tp + fn, 1e-8)
+                                return 0.0 if (prec + rec) == 0 else 2 * prec * rec / (prec + rec)
+                            f1_vals = [f1_pair(labels_cpu[i], pred_ids[i]) for i in range(labels_cpu.shape[0])]
+                            advanced_metrics["token_f1"] = float(sum(f1_vals) / max(len(f1_vals), 1))
+
+                        # Semantic equivalence (functional correctness)
+                        if config.eval_enable_semantic_equivalence:
+                            def sem_eq(true_ids, pred_ids):
+                                a = [t for t in ids_to_tokens(true_ids) if t != "<pad>"]
+                                b = [t for t in ids_to_tokens(pred_ids) if t != "<pad>"]
+                                # parse simple prefix form: ( op a b )
+                                def parse(tokens, i=0):
+                                    if i >= len(tokens):
+                                        return None, i
+                                    tok = tokens[i]
+                                    if tok == "(":
+                                        if i + 1 >= len(tokens):
+                                            return None, i + 1
+                                        op = tokens[i + 1]
+                                        left, j = parse(tokens, i + 2)
+                                        if left is None:
+                                            return None, j
+                                        right, k = parse(tokens, j)
+                                        if right is None:
+                                            return None, k
+                                        if k < len(tokens) and tokens[k] == ")":
+                                            return (op, left, right), k + 1
+                                        return None, k
+                                    if tok == ")":
+                                        return None, i + 1
+                                    try:
+                                        return int(tok), i + 1
+                                    except Exception:
+                                        return ("var", tok), i + 1
+                                def eval_ast(node, env):
+                                    try:
+                                        if node is None:
+                                            return None
+                                        if isinstance(node, int):
+                                            return node
+                                        if isinstance(node, tuple) and len(node) == 2 and node[0] == "var":
+                                            return int(env.get(node[1], 0))
+                                        if isinstance(node, tuple) and len(node) == 3:
+                                            op, l, r = node
+                                            va = eval_ast(l, env)
+                                            vb = eval_ast(r, env)
+                                            if va is None or vb is None:
+                                                return None
+                                            if op == "+":
+                                                return va + vb
+                                            if op == "-":
+                                                return va - vb
+                                            if op == "*":
+                                                return va * vb
+                                            if op == "/":
+                                                if vb == 0:
+                                                    return None
+                                                return int(va // vb)
+                                        return None
+                                    except Exception:
+                                        return None
+                                ast_a, _ = parse(a, 0)
+                                ast_b, _ = parse(b, 0)
+                                if ast_a is None or ast_b is None:
+                                    return False
+                                import random as _r
+                                tried = 0
+                                for _ in range(5):
+                                    env = {v: _r.randint(-5, 5) for v in {t for t in a + b if t.isalpha() and len(t) == 1}}
+                                    va = eval_ast(ast_a, env)
+                                    vb = eval_ast(ast_b, env)
+                                    if va is None or vb is None:
+                                        continue
+                                    tried += 1
+                                    if va != vb:
+                                        return False
+                                return tried > 0
+                            sem_hits = sum(1 for i in range(labels_cpu.shape[0]) if sem_eq(labels_cpu[i], pred_ids[i]))
+                            advanced_metrics["semantic_equivalence_ratio"] = float(sem_hits) / max(int(labels_cpu.shape[0]), 1)
+
+                        # Pass@k and Pass^k (independent token sampling)
+                        if isinstance(config.eval_pass_k, int) and config.eval_pass_k > 0:
+                            k = int(config.eval_pass_k)
+                            probs = torch.softmax(logits_cpu.to(torch.float32), dim=-1)
+                            total = labels_cpu.shape[0]
+                            pass_any = 0
+                            pass_all = 0
+                            pad_id = int(eval_metadata.pad_id)
+                            for i in range(total):
+                                label_ids = labels_cpu[i]
+                                valid_len = int((label_ids != pad_id).sum().item())
+                                if valid_len == 0:
+                                    continue
+                                seq_probs = probs[i, :valid_len]
+                                successes = 0
+                                all_ok = True
+                                for _s in range(k):
+                                    sampled = torch.multinomial(seq_probs, num_samples=1, replacement=True).squeeze(-1)
+                                    ok = torch.equal(sampled.to(torch.long), label_ids[:valid_len].to(torch.long))
+                                    successes += int(ok)
+                                    all_ok = all_ok and bool(ok)
+                                pass_any += int(successes > 0)
+                                pass_all += int(all_ok)
+                            advanced_metrics[f"pass_at_{k}"] = float(pass_any) / max(total, 1)
+                            advanced_metrics[f"pass_hat_{k}"] = float(pass_all) / max(total, 1)
+
+                        # TAR@N (consistency metrics)
+                        if isinstance(config.eval_tar_n, int) and config.eval_tar_n > 0:
+                            n = int(config.eval_tar_n)
+                            probs = torch.softmax(logits_cpu.to(torch.float32), dim=-1)
+                            total = labels_cpu.shape[0]
+                            tar_rn = 0
+                            tar_an = 0
+                            pad_id = int(eval_metadata.pad_id)
+                            for i in range(total):
+                                label_ids = labels_cpu[i]
+                                valid_len = int((label_ids != pad_id).sum().item())
+                                if valid_len == 0:
+                                    continue
+                                seq_probs = probs[i, :valid_len]
+                                outputs = []
+                                flags = []
+                                for _s in range(n):
+                                    sampled = torch.multinomial(seq_probs, num_samples=1, replacement=True).squeeze(-1)
+                                    s = tokens_to_str(ids_to_tokens(sampled))
+                                    outputs.append(s)
+                                    flags.append(bool(torch.equal(sampled.to(torch.long), label_ids[:valid_len].to(torch.long))))
+                                if len(set(outputs)) == 1:
+                                    tar_rn += 1
+                                if all(flags) or (not any(flags)):
+                                    tar_an += 1
+                            advanced_metrics[f"tar_r@{n}"] = float(tar_rn) / max(total, 1)
+                            advanced_metrics[f"tar_a@{n}"] = float(tar_an) / max(total, 1)
+
+                        # ACT correlations and efficiency
+                        if config.eval_enable_act_analysis and ("steps" in all_preds):
+                            steps = all_preds["steps"].to(torch.float32).view(-1)
+                            pad_id = int(eval_metadata.pad_id)
+                            pred_len = (pred_ids != pad_id).to(torch.float32).sum(dim=-1)
+                            exact = (torch.eq(pred_ids, labels_cpu) | (labels_cpu == pad_id)).all(dim=-1).to(torch.float32)
+                            def _corr(a, b):
+                                a = a - a.mean()
+                                b = b - b.mean()
+                                den = float((a.norm() * b.norm()).item())
+                                return 0.0 if den == 0 else float((a * b).sum().item() / den)
+                            advanced_metrics["corr_steps_exact"] = _corr(steps, exact)
+                            advanced_metrics["corr_steps_pred_len"] = _corr(steps, pred_len.to(torch.float32))
+                            correct_mask = exact > 0.5
+                            advanced_metrics["avg_steps_correct"] = float(steps[correct_mask].mean().item()) if correct_mask.any() else 0.0
+                            advanced_metrics["avg_steps_incorrect"] = float(steps[~correct_mask].mean().item()) if (~correct_mask).any() else 0.0
+                            acc = float(exact.mean().item())
+                            avg_len = float(pred_len.to(torch.float32).mean().item())
+                            avg_steps = float(steps.mean().item()) if steps.numel() > 0 else 0.0
+                            advanced_metrics["accuracy_per_step"] = acc / max(avg_steps, 1e-6)
+                            advanced_metrics["accuracy_per_token"] = acc / max(avg_len, 1e-6)
+                except Exception:
+                    pass
 
         # Logging
         # Reduce to rank 0
@@ -350,6 +572,11 @@ def evaluate(config: PretrainConfig, train_state: TrainState, eval_loader: torch
                 for set_name, metrics in reduced_metrics.items():
                     count = metrics.pop("count")
                     reduced_metrics[set_name] = {k: v / count for k, v in metrics.items()}
+
+                # Attach advanced metrics to the first set (if any)
+                if len(advanced_metrics):
+                    attach_key = next(iter(reduced_metrics.keys())) if len(reduced_metrics) else "all"
+                    reduced_metrics.setdefault(attach_key, {}).update(advanced_metrics)
 
                 return reduced_metrics
 
